@@ -6,51 +6,39 @@ sys.path.append(os.path.abspath("")+'/../scripts/')
 import numpy as np
 import scipy.signal.windows as windows
 
-from meer21cm import MockSimulation
 from meer21cm.grid import shot_noise_correction_from_gridding
 from meer21cm.power import get_shot_noise_galaxy
-from survey_configuration import *
+from set_inputs import *
 
 
-def run_realization_Pks(seed):
+def run_realization_Pks(input_dict, default_dict):
     '''
     Return the power spectra of the lognormal realizations 
     for a given input stored in survey_configuration.py
 
     Input:
+        - input_dict: whether you want to change some of the inputs
+        - default_dict: defined in set_inputs
         - seed: RNG seed
     Returns:
         mock.kmode, Pk_HI_3D, Pk_HIxgal_3D, Pk_gal_3D
     '''
     
-
-    mock = MockSimulation(
-        wproj=wcs,                          # WCS object
-        num_pix_x=num_pix_x,                # number of pixels in the x direction of WCS object
-        num_pix_y=num_pix_y,                # number of pixels in the y direction of WCS object
-        ra_range=ra_range,                  # RA range of observed patch
-        dec_range=dec_range,                # DEC range of observed pathc
-        nu=nu_arr,                          # Frequency channels array
-        discrete_source_dndz=zgal_func,     # interpolator object with the galaxy number count as function of redshift
-        seed=seed,                          # RNG seed
-        tracer_bias_1= tracer_bias_1,       # bias for tracer 1
-        tracer_bias_2= tracer_bias_2,       # bias for tracer 2
-        mean_amp_1=mean_amp_1,              # which amplitude for HI field?
-        omega_hi=Omega_HI,                  # Omega_HI abundance at z = 0
-        sigma_beam_ch=sigma_beam_new,       # Angular resolution per channel
-        sigma_v_1= sigma_v_1,               # typical peculiar velocity for tracers 1 for the RSD FoGs (in km/s)
-        sigma_v_2= sigma_v_2,               # typical peculiar velocity for tracers 2 for the RSD FoGs (in km/s)
-    )
     # If you want a different matter power spectrum (commented here, uncomment also in survey_configuration)
     '''
-    mock._matter_power_spectrum_fnc = ipk
+    kk = np.geomspace(1e-4,1e3,100)
+    pk = kk**-2
+    ipk = interp1d(kk,pk,bounds_error=False,fill_value='extrapolate')
+    input_dict['ipk']
     '''
 
+    mock, dic = set_meer21cm(input_dict = input_dict, default_dict = default_dict)
+
     # Get the tupper function
-    mock.taper_func = getattr(windows, window_name)
+    mock.taper_func = getattr(windows, dic['window_name'])
     
     # Get total number of galaxies
-    num_gal = int(mock.survey_volume * ngal)
+    num_gal = int(mock.survey_volume * dic['ngal'])
     mock.num_discrete_source = num_gal
 
     #mock.W_HI = np.ones_like(mock.W_HI)
@@ -66,7 +54,7 @@ def run_realization_Pks(seed):
     # randomly generate frequency dependend noise
     generator = np.random.default_rng(seed=seed+50) # this 50 means nothing, just want a different seed
     num_pix =np.sum(mock.W_HI[:,:,0]) #total number of pixels that we have in the WCS object
-    noise_realisation = (generator.normal(scale = sigma_N(num_pix)[None, None, :].to(u.K).value, size=(num_pix_x, num_pix_y, num_ch)))
+    noise_realisation = (generator.normal(scale = sigma_N(dic, num_pix)[None, None, :].to(u.K).value, size=(mock.num_pix_x, mock.num_pix_y, len(mock.nu))))
 
     mock.data = (
         mock.propagate_mock_field_to_data(mock.mock_tracer_field_1)
