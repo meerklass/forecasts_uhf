@@ -1,8 +1,14 @@
 import numpy as np
+import healpy as hp
+import os
+
 from meer21cm.power import bin_3d_to_cy, bin_3d_to_1d
+from meer21cm import MockSimulation
+from meer21cm.util import redshift_to_freq
 
 import matplotlib.pyplot as plt
-from meer21cm.plot import plot_map
+
+from scipy.interpolate import interp1d
 
 
 def add_boundary_knots(spline):
@@ -175,3 +181,81 @@ def plot_1d_power(
     axes[1].set_ylim(ratio_min, ratio_max)
     axes[1].legend()
     return fig
+
+def generate_healpix_mask(dic):
+    # extract the basic metadata
+    nu_min = redshift_to_freq(dic['z_max'])
+    nu_max = redshift_to_freq(dic['z_min'])
+    
+    ra_range = [dic['ra_center'] - dic['ra_obs_width']/2, dic['ra_center'] + dic['ra_obs_width']/2]
+    dec_range = [dic['dec_center'] - dic['dec_obs_width']/2, dic['dec_center'] + dic['dec_obs_width']/2]
+    
+    sim_upres_radial = 1
+    sim_upres_transvers = 1/2
+    
+    # Load galaxies #
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        dic['dndz_filename'],
+    )
+    dndz_data = np.load(path)
+    
+    z_bin = dndz_data["z_bin"]
+    z_count = dndz_data["z_count"]
+    z_cen = (z_bin[:-1] + z_bin[1:]) / 2
+    dV_arr = dic['Cosmo'].differential_comoving_volume(z_cen)
+    
+    zgal_func = interp1d(
+            z_cen, z_count / dV_arr, kind="linear", bounds_error=False, fill_value=0
+        )
+    
+    mock = MockSimulation(
+        nu_min=nu_min,
+        nu_max=nu_max,
+        pickle_file=dic['pickle_file'],
+        downres_factor_radial=sim_upres_radial,
+        downres_factor_transverse=sim_upres_transvers,
+        batch_number=dic['batch_number'],
+        discrete_source_dndz=zgal_func,
+        tracer_bias_2=1.0,
+        tracer_bias_1=1.0,
+        sigma_v_1=100,
+        sigma_v_2=100,
+        mean_amp_1="average_hi_temp",
+    )
+    mock.read_from_pickle()
+    #mock.nu = mock.nu[::downres_factor_freq] # no need for extremely fine frequency resolution
+    #mock.W_HI = mock.W_HI[:,:,::downres_factor_freq]
+    #mock.w_HI = mock.w_HI[:,:,::downres_factor_freq]
+    mock.data = np.zeros((mock.num_pix_x,mock.num_pix_y,mock.nu.size))
+    mock.trim_map_to_range()
+    mock_hp = MockSimulation(
+        hp_nside=dic['hp_nside'], 
+        nu = mock.nu,
+        ra_range = ra_range, 
+        dec_range = dec_range, 
+    )
+    pixel_id_wcs = hp.ang2pix(mock_hp.hp_nside,mock.ra_map,mock.dec_map,lonlat=True)
+    hit_counts_hp = np.zeros((hp.nside2npix(mock_hp.hp_nside),len(mock.nu)))
+    for i in range(len(mock.nu)):
+        np.add.at(hit_counts_hp[:,i],pixel_id_wcs.ravel(),mock.w_HI[:,:,i].ravel())
+        # smooth it
+        map_temp = hp.ud_grade(hit_counts_hp[:,i],mock_hp.hp_nside//2)
+        hit_counts_hp[:,i] = hp.ud_grade(map_temp,mock_hp.hp_nside)
+    hit_counts_hp = hit_counts_hp[mock_hp.pixel_id]
+    return mock.nu, hit_counts_hp
+
+def generate_mock_healpix(nu=None,hit_counts_hp=None, dic = None):
+    if hit_counts_hp is None:
+        nu, hit_counts_hp = generate_healpix_mask()
+    ra_range = [dic['ra_center'] - dic['ra_obs_width']/2, dic['ra_center'] + dic['ra_obs_width']/2]
+    dec_range = [dic['dec_center'] - dic['dec_obs_width']/2, dic['dec_center'] + dic['dec_obs_width']/2]
+    mock = MockSimulation(
+        hp_nside=dic['hp_nside'],
+        nu = nu,
+        ra_range = ra_range,
+        dec_range = dec_range,
+    )
+    mock.W_HI = hit_counts_hp>0
+    mock.w_HI = hit_counts_hp
+    return mock

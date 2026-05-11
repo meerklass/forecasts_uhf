@@ -10,7 +10,7 @@ from meer21cm import MockSimulation, PowerSpectrum
 
 from scipy.interpolate import CubicSpline, interp1d
 
-from utils import add_boundary_knots
+from utils import add_boundary_knots, generate_healpix_mask
 
 ############################
 # DEFAULT INPUT PARAMETERS #
@@ -18,8 +18,12 @@ from utils import add_boundary_knots
 
 z_min, z_max = 0.6, 0.8                     # Minimum and maximum redshift to observe 
 pix_resol = 0.5                             # Pixel resolution (in degrees)
+hp_nside = 128,                             # Healpix NSIDE
+healpix = True,                             # Wether to do healpix of WCS
 nu_resol = 132812.5                         # Frequency resolution --- channel width (in Hz)
 #
+pickle_file = None                          # Pickle file with the mask and hitmaps
+hit_counts = None                           # Healpix hitcounts
 ra_center = 150                             # Center RA position (in degrees)
 ra_sky_width = 60                           # Width in RA for the sky WCS object -> NOT SURVEY! (in degrees)
 dec_center = -2.5                           # Center DEC position (in degrees)
@@ -47,6 +51,9 @@ mean_amp_1 = "average_hi_temp"              # Which amplitude to use for the HI 
 #
 seed = 123                                  # seed
 #
+precision = False                           #Boolean, whether you need double precision or not (which would make it float)
+batch_number = 1                            #Number of batches to do calculations in (to reduce RAM requirements)
+#
 ipk = None
 ####
 # If you want a different matter power spectrum (example commented below for a power law for a scale-free simulation)
@@ -55,7 +62,8 @@ kk = np.geomspace(1e-4,1e3,100)
 pk = kk**-2
 ipk = interp1d(kk,pk,bounds_error=False,fill_value='extrapolate')
 '''
-default_dict = dict(z_min = z_min, z_max = z_max, pix_resol = pix_resol, nu_resol = nu_resol,
+default_dict = dict(z_min = z_min, z_max = z_max, pix_resol = pix_resol, hp_nside = hp_nside, healpix = healpix, nu_resol = nu_resol,
+                    pickle_file = pickle_file, hit_counts = hit_counts, 
                     ra_center = ra_center, ra_sky_width = ra_sky_width, dec_center = dec_center, dec_sky_width = dec_sky_width,
                     ra_obs_width = ra_obs_width, dec_obs_width = dec_obs_width,
                     dish_size = dish_size, ndish = ndish, t_obs = t_obs, n_feeds = n_feeds,
@@ -65,7 +73,7 @@ default_dict = dict(z_min = z_min, z_max = z_max, pix_resol = pix_resol, nu_reso
                     sigma_v_1 = sigma_v_1, sigma_v_2 = sigma_v_2, 
                     tracer_bias_1 = tracer_bias_1, tracer_bias_2 = tracer_bias_2,
                     Omega_HI = Omega_HI, mean_amp_1 = mean_amp_1, seed = seed,
-                    ipk = ipk)
+                    precision = precision, batch_number = batch_number,ipk = ipk)
 
 def set_meer21cm(input_dict = None, default_dict = default_dict, which='mock'):
     '''
@@ -85,10 +93,16 @@ def set_meer21cm(input_dict = None, default_dict = default_dict, which='mock'):
 
     
     # Frequency & redshift channels # 
-    nu_min = redshift_to_freq(dic['z_max'])
-    nu_max = redshift_to_freq(dic['z_min'])
-    num_ch = int((nu_max - nu_min) / dic['nu_resol'])
-    nu_arr = np.linspace(nu_min, nu_min + (num_ch - 1) * dic['nu_resol'], num_ch)
+    if dic['pickle_file'] != None:
+        if not np.any(dic['hit_counts']):
+            nu_arr, dic['hit_counts'] = generate_healpix_mask(dic)
+        else:
+            nu_arr = dic['pickle_nu_arr']
+    else:
+        nu_min = redshift_to_freq(dic['z_max'])
+        nu_max = redshift_to_freq(dic['z_min'])
+        num_ch = int((nu_max - nu_min) / dic['nu_resol'])
+        nu_arr = np.linspace(nu_min, nu_min + (num_ch - 1) * dic['nu_resol'], num_ch)
     z_ch = freq_to_redshift(nu_arr)
 
     # CREATE WCS OBJECT # 
@@ -127,50 +141,110 @@ def set_meer21cm(input_dict = None, default_dict = default_dict, which='mock'):
             z_cen, z_count / dV_arr, kind="linear", bounds_error=False, fill_value=0
         )
 
-    if which == 'mock':
-        mock = MockSimulation(
-        wproj=wcs,                          # WCS object
-        num_pix_x=num_pix_x,                # number of pixels in the x direction of WCS object
-        num_pix_y=num_pix_y,                # number of pixels in the y direction of WCS object
-        ra_range=ra_range,                  # RA range of observed patch
-        dec_range=dec_range,                # DEC range of observed pathc
-        nu=nu_arr,                          # Frequency channels array
-        discrete_source_dndz=zgal_func,     # interpolator object with the galaxy number count as function of redshift
-        seed=dic['seed'],                   # RNG seed
-        tracer_bias_1= dic['tracer_bias_1'],# bias for tracer 1
-        tracer_bias_2= dic['tracer_bias_2'],# bias for tracer 2
-        mean_amp_1=dic['mean_amp_1'],       # which amplitude for HI field?
-        omega_hi=dic['Omega_HI'],           # Omega_HI abundance at z = 0
-        sigma_beam_ch=sigma_beam_new,       # Angular resolution per channel
-        sigma_v_1= dic['sigma_v_1'],        # typical peculiar velocity for tracers 1 for the RSD FoGs (in km/s)
-        sigma_v_2= dic['sigma_v_2'],        # typical peculiar velocity for tracers 2 for the RSD FoGs (in km/s)
-        )
-        if dic['ipk'] != None:
-            mock._matter_power_spectrum_fnc = dic['ipk']
-        return mock, dic
-    
+    if dic['healpix']:
+        if which == 'mock':
+            mock = MockSimulation(
+                hp_nside = dic['hp_nside'],         # NSIDE healpix
+                ra_range=ra_range,                  # RA range of observed patch
+                dec_range=dec_range,                # DEC range of observed pathc
+                nu=nu_arr,                          # Frequency channels array
+                discrete_source_dndz=zgal_func,     # interpolator object with the galaxy number count as function of redshift
+                seed=dic['seed'],                   # RNG seed
+                tracer_bias_1= dic['tracer_bias_1'],# bias for tracer 1
+                tracer_bias_2= dic['tracer_bias_2'],# bias for tracer 2
+                mean_amp_1=dic['mean_amp_1'],       # which amplitude for HI field?
+                omega_hi=dic['Omega_HI'],           # Omega_HI abundance at z = 0
+                sigma_beam_ch=sigma_beam_new,       # Angular resolution per channel
+                sigma_v_1= dic['sigma_v_1'],        # typical peculiar velocity for tracers 1 for the RSD FoGs (in km/s)
+                sigma_v_2= dic['sigma_v_2'],        # typical peculiar velocity for tracers 2 for the RSD FoGs (in km/s)
+                precision = precision,              # double precision or not
+                batch_number = dic['batch_number'],        # number of batches to calculate things in
+            )
+            if dic['ipk'] != None:
+                mock._matter_power_spectrum_fnc = dic['ipk']
+            if dic['pickle_file'] != None:
+                mock.nu = nu_arr
+                mock.W_HI = dic['hit_counts'] > 0
+                mock.w_HI = dic['hit_counts']
+            return mock, dic
+        
+        else:
+            ps = PowerSpectrum(
+            hp_nside = dic['hp_nside'],         # NSIDE healpix
+            ra_range=ra_range,                  # RA range of observed patch
+            dec_range=dec_range,                # DEC range of observed pathc
+            nu=nu_arr,                          # Frequency channels array
+            discrete_source_dndz=zgal_func,     # interpolator object with the galaxy number count as function of redshift
+            seed=dic['seed'],                   # RNG seed
+            tracer_bias_1= dic['tracer_bias_1'],# bias for tracer 1
+            tracer_bias_2= dic['tracer_bias_2'],# bias for tracer 2
+            mean_amp_1=dic['mean_amp_1'],       # which amplitude for HI field?
+            omega_hi=dic['Omega_HI'],           # Omega_HI abundance at z = 0
+            sigma_beam_ch=sigma_beam_new,       # Angular resolution per channel
+            sigma_v_1= dic['sigma_v_1'],        # typical peculiar velocity for tracers 1 for the RSD FoGs (in km/s)
+            sigma_v_2= dic['sigma_v_2'],        # typical peculiar velocity for tracers 2 for the RSD FoGs (in km/s)
+            precision = precision,              # double precision or not
+            batch_number = dic['batch_number'],        # number of batches to calculate things in
+            )
+            if dic['ipk'] != None:
+                ps._matter_power_spectrum_fnc = dic['ipk']
+            if dic['pickle_file'] != None:
+                if not np.any(dic['hit_counts']):
+                    nu_arr, dic['hit_counts'] = generate_healpix_mask(dic)
+                else:
+                    nu_arr = dic['pickle_nu_arr']
+                ps.nu = nu_arr
+                ps.W_HI = dic['hit_counts'] > 0
+                ps.w_HI = dic['hit_counts']
+            return ps, dic
     else:
-        ps = PowerSpectrum(
-        wproj=wcs,                          # WCS object
-        num_pix_x=num_pix_x,                # number of pixels in the x direction of WCS object
-        num_pix_y=num_pix_y,                # number of pixels in the y direction of WCS object
-        ra_range=ra_range,                  # RA range of observed patch
-        dec_range=dec_range,                # DEC range of observed pathc
-        nu=nu_arr,                          # Frequency channels array
-        discrete_source_dndz=zgal_func,     # interpolator object with the galaxy number count as function of redshift
-        seed=dic['seed'],                   # RNG seed
-        tracer_bias_1= dic['tracer_bias_1'],# bias for tracer 1
-        tracer_bias_2= dic['tracer_bias_2'],# bias for tracer 2
-        mean_amp_1=dic['mean_amp_1'],       # which amplitude for HI field?
-        omega_hi=dic['Omega_HI'],           # Omega_HI abundance at z = 0
-        sigma_beam_ch=sigma_beam_new,       # Angular resolution per channel
-        sigma_v_1= dic['sigma_v_1'],        # typical peculiar velocity for tracers 1 for the RSD FoGs (in km/s)
-        sigma_v_2= dic['sigma_v_2'],        # typical peculiar velocity for tracers 2 for the RSD FoGs (in km/s)
-        )
-        if dic['ipk'] != None:
-            ps._matter_power_spectrum_fnc = dic['ipk']
+        if which == 'mock':
+            mock = MockSimulation(
+                wproj=wcs,                          # WCS object
+                num_pix_x=num_pix_x,                # number of pixels in the x direction of WCS object
+                num_pix_y=num_pix_y,                # number of pixels in the y direction of WCS object
+                ra_range=ra_range,                  # RA range of observed patch
+                dec_range=dec_range,                # DEC range of observed pathc
+                nu=nu_arr,                          # Frequency channels array
+                discrete_source_dndz=zgal_func,     # interpolator object with the galaxy number count as function of redshift
+                seed=dic['seed'],                   # RNG seed
+                tracer_bias_1= dic['tracer_bias_1'],# bias for tracer 1
+                tracer_bias_2= dic['tracer_bias_2'],# bias for tracer 2
+                mean_amp_1=dic['mean_amp_1'],       # which amplitude for HI field?
+                omega_hi=dic['Omega_HI'],           # Omega_HI abundance at z = 0
+                sigma_beam_ch=sigma_beam_new,       # Angular resolution per channel
+                sigma_v_1= dic['sigma_v_1'],        # typical peculiar velocity for tracers 1 for the RSD FoGs (in km/s)
+                sigma_v_2= dic['sigma_v_2'],        # typical peculiar velocity for tracers 2 for the RSD FoGs (in km/s)
+                precision = precision,              # double precision or not
+                batch_number = dic['batch_number'],        # number of batches to calculate things in
+            )
+            if dic['ipk'] != None:
+                mock._matter_power_spectrum_fnc = dic['ipk']
+            return mock, dic
+        else:
+            ps = PowerSpectrum(
+                wproj=wcs,                          # WCS object
+                num_pix_x=num_pix_x,                # number of pixels in the x direction of WCS object
+                num_pix_y=num_pix_y,                # number of pixels in the y direction of WCS object
+                ra_range=ra_range,                  # RA range of observed patch
+                dec_range=dec_range,                # DEC range of observed pathc
+                nu=nu_arr,                          # Frequency channels array
+                discrete_source_dndz=zgal_func,     # interpolator object with the galaxy number count as function of redshift
+                seed=dic['seed'],                   # RNG seed
+                tracer_bias_1= dic['tracer_bias_1'],# bias for tracer 1
+                tracer_bias_2= dic['tracer_bias_2'],# bias for tracer 2
+                mean_amp_1=dic['mean_amp_1'],       # which amplitude for HI field?
+                omega_hi=dic['Omega_HI'],           # Omega_HI abundance at z = 0
+                sigma_beam_ch=sigma_beam_new,       # Angular resolution per channel
+                sigma_v_1= dic['sigma_v_1'],        # typical peculiar velocity for tracers 1 for the RSD FoGs (in km/s)
+                sigma_v_2= dic['sigma_v_2'],        # typical peculiar velocity for tracers 2 for the RSD FoGs (in km/s)
+                precision = precision,              # double precision or not
+                batch_number = dic['batch_number'],        # number of batches to calculate things in
+            )
+            if dic['ipk'] != None:
+                ps._matter_power_spectrum_fnc = dic['ipk']
      
-        return ps, dic
+            return ps, dic
 
 
 
